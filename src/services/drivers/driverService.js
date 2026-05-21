@@ -1,76 +1,88 @@
 /**
- * APEX AI — Driver Service
+ * ============================================================
+ * APEX AI — Driver Service (Local Mode — no Supabase)
+ * Full CRUD via localStorage. Zero external dependencies.
+ * ============================================================
  */
 
-import { supabase }       from '../supabase/supabaseClient'
-import { useDriverStore } from '../../core/storage'
+import { useDriverStore } from '@core/storage'
+
+const LS_KEY   = 'apex:db:drivers'
+const SCORE_KEY = 'apex:db:driver_scores'
+
+const lsRead  = (key) => { try { return JSON.parse(localStorage.getItem(key) || '[]') } catch { return [] } }
+const lsWrite = (key, rows) => localStorage.setItem(key, JSON.stringify(rows))
+const uid     = () => `drv_${Date.now()}_${Math.random().toString(36).slice(2,7)}`
 
 export const DRIVER_STATUS = {
   ACTIVE:    'active',
   OFF_DUTY:  'off_duty',
   ON_BREAK:  'on_break',
   SUSPENDED: 'suspended',
-  INACTIVE:  'inactive'
+  INACTIVE:  'inactive',
 }
 
 export const LICENCE_TYPE = {
-  A: 'A', B: 'B', C: 'C', CE: 'CE', D: 'D', DE: 'DE', AM: 'AM'
+  A: 'A', B: 'B', C: 'C', CE: 'CE', D: 'D', DE: 'DE', AM: 'AM',
 }
 
 export const driverService = {
   async fetchDrivers(filters = {}) {
     useDriverStore.getState().setLoading(true)
     try {
-      let q = supabase.from('drivers').select('*').order('created_at', { ascending: false })
-      if (filters.status) q = q.eq('status', filters.status)
-      if (filters.search) q = q.ilike('full_name', `%${filters.search}%`)
-      const { data, error } = await q
-      if (error) throw error
-      useDriverStore.getState().setDrivers(data || [])
-      return data
-    } catch (e) { console.error('[DriverService]', e); return [] }
-    finally { useDriverStore.getState().setLoading(false) }
+      let rows = lsRead(LS_KEY).sort((a, b) => b.created_at?.localeCompare(a.created_at))
+      if (filters.status) rows = rows.filter(d => d.status === filters.status)
+      if (filters.search) {
+        const s = filters.search.toLowerCase()
+        rows = rows.filter(d => d.full_name?.toLowerCase().includes(s) || d.licence_number?.toLowerCase().includes(s))
+      }
+      useDriverStore.getState().setDrivers(rows)
+      return rows
+    } catch (e) {
+      console.error('[driverService] fetchDrivers:', e)
+      return []
+    } finally {
+      useDriverStore.getState().setLoading(false)
+    }
   },
 
   async getDriver(id) {
-    const { data, error } = await supabase.from('drivers').select('*').eq('id', id).single()
-    if (error) throw error
-    return data
+    return lsRead(LS_KEY).find(d => d.id === id) || null
   },
 
   async createDriver(payload) {
-    const { data, error } = await supabase.from('drivers').insert(payload).select().single()
-    if (error) throw error
+    const rows = lsRead(LS_KEY)
+    const row  = { ...payload, id: uid(), created_at: new Date().toISOString() }
+    lsWrite(LS_KEY, [row, ...rows])
     await this.fetchDrivers()
-    return data
+    return row
   },
 
   async updateDriver(id, payload) {
-    const { data, error } = await supabase.from('drivers').update(payload).eq('id', id).select().single()
-    if (error) throw error
+    const rows  = lsRead(LS_KEY)
+    const update = { ...payload, updated_at: new Date().toISOString() }
+    const idx   = rows.findIndex(d => d.id === id)
+    if (idx > -1) { rows[idx] = { ...rows[idx], ...update }; lsWrite(LS_KEY, rows) }
     useDriverStore.getState().setDrivers(
-      useDriverStore.getState().drivers.map(d => d.id === id ? data : d)
+      useDriverStore.getState().drivers.map(d => d.id === id ? { ...d, ...update } : d)
     )
-    return data
+    return rows[idx] || null
   },
 
   async deleteDriver(id) {
-    const { error } = await supabase.from('drivers').delete().eq('id', id)
-    if (error) throw error
+    const rows = lsRead(LS_KEY).filter(d => d.id !== id)
+    lsWrite(LS_KEY, rows)
     useDriverStore.getState().setDrivers(
       useDriverStore.getState().drivers.filter(d => d.id !== id)
     )
   },
 
   async getScores(driverId) {
-    const { data } = await supabase
-      .from('driver_scores')
-      .select('*')
-      .eq('driver_id', driverId)
-      .order('date', { ascending: false })
-      .limit(30)
-    return data || []
-  }
+    return lsRead(SCORE_KEY)
+      .filter(s => s.driver_id === driverId)
+      .sort((a, b) => b.date?.localeCompare(a.date))
+      .slice(0, 30)
+  },
 }
 
 export default driverService

@@ -1,114 +1,89 @@
 /**
  * ============================================================
- * APEX AI — Live Telemetry Service (Run 16)
- * Supabase realtime subscriptions for vehicle telemetry.
- * Falls back gracefully if tables don't exist yet.
+ * APEX AI — Telemetry Service (Local Mode)
+ * Stores telemetry in localStorage. Uses BroadcastChannel
+ * to sync live data across tabs (AP3X → Fleet HQ).
  * ============================================================
  */
 
-import { supabase }      from '@services/supabase/supabaseClient'
 import { useFleetStore } from '@core/storage'
+
+const TEL_KEY = 'apex:db:telemetry'
+const BC_NAME = 'apex:telemetry'
+
+const lsRead  = () => { try { return JSON.parse(localStorage.getItem(TEL_KEY) || '[]') } catch { return [] } }
+const lsWrite = (rows) => localStorage.setItem(TEL_KEY, JSON.stringify(rows))
+const uid     = () => `tel_${Date.now()}_${Math.random().toString(36).slice(2,7)}`
 
 export const telemetryService = {
   _channels: new Map(),
 
-  /**
-   * Subscribe to live telemetry for a single vehicle.
-   * Updates useFleetStore.telemetry[vehicleId] automatically.
-   */
   subscribe(vehicleId, callback) {
-    if (this._channels.has(vehicleId)) return // already subscribed
-
-    const channel = supabase
-      .channel(`telemetry:${vehicleId}`)
-      .on('postgres_changes', {
-        event:  'INSERT',
-        schema: 'public',
-        table:  'vehicle_telemetry',
-        filter: `vehicle_id=eq.${vehicleId}`
-      }, payload => {
-        const data = payload.new
-        useFleetStore.getState().updateTelemetry(vehicleId, data)
-        callback?.(data)
-      })
-      .subscribe()
-
-    this._channels.set(vehicleId, channel)
+    if (this._channels.has(vehicleId)) return
+    try {
+      const bc = new BroadcastChannel(BC_NAME)
+      bc.onmessage = (e) => {
+        if (e.data?.vehicle_id === vehicleId) {
+          useFleetStore.getState().updateTelemetry?.(vehicleId, e.data)
+          callback?.(e.data)
+        }
+      }
+      this._channels.set(vehicleId, bc)
+    } catch {}
     return () => this.unsubscribe(vehicleId)
   },
 
   unsubscribe(vehicleId) {
-    const ch = this._channels.get(vehicleId)
-    if (ch) { ch.unsubscribe(); this._channels.delete(vehicleId) }
+    const bc = this._channels.get(vehicleId)
+    if (bc) { try { bc.close() } catch {} this._channels.delete(vehicleId) }
   },
 
   unsubscribeAll() {
-    this._channels.forEach((ch) => ch.unsubscribe())
+    this._channels.forEach(bc => { try { bc.close() } catch {} })
     this._channels.clear()
   },
 
-  /**
-   * Subscribe to ALL vehicle telemetry (fleet-wide).
-   */
   subscribeFleet(callback) {
-    const channel = supabase
-      .channel('telemetry:fleet')
-      .on('postgres_changes', {
-        event:  'INSERT',
-        schema: 'public',
-        table:  'vehicle_telemetry',
-      }, payload => {
-        const data = payload.new
-        if (data.vehicle_id) {
-          useFleetStore.getState().updateTelemetry(data.vehicle_id, data)
-          callback?.(data)
+    try {
+      const bc = new BroadcastChannel(BC_NAME)
+      bc.onmessage = (e) => {
+        if (e.data?.vehicle_id) {
+          useFleetStore.getState().updateTelemetry?.(e.data.vehicle_id, e.data)
+          callback?.(e.data)
         }
-      })
-      .subscribe()
-
-    this._channels.set('fleet', channel)
-    return () => { channel.unsubscribe(); this._channels.delete('fleet') }
+      }
+      this._channels.set('fleet', bc)
+      return () => { try { bc.close() } catch {} this._channels.delete('fleet') }
+    } catch {
+      return () => {}
+    }
   },
 
-  /**
-   * Fetch latest telemetry snapshot for a vehicle.
-   */
   async getLatest(vehicleId) {
-    const { data } = await supabase
-      .from('vehicle_telemetry')
-      .select('*')
-      .eq('vehicle_id', vehicleId)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .single()
-    return data || null
+    return lsRead()
+      .filter(t => t.vehicle_id === vehicleId)
+      .sort((a, b) => b.created_at?.localeCompare(a.created_at))[0] || null
   },
 
-  /**
-   * Fetch telemetry history for charting.
-   */
   async getHistory(vehicleId, minutes = 60) {
     const since = new Date(Date.now() - minutes * 60000).toISOString()
-    const { data } = await supabase
-      .from('vehicle_telemetry')
-      .select('*')
-      .eq('vehicle_id', vehicleId)
-      .gte('created_at', since)
-      .order('created_at')
-    return data || []
+    return lsRead()
+      .filter(t => t.vehicle_id === vehicleId && t.created_at >= since)
+      .sort((a, b) => a.created_at?.localeCompare(b.created_at))
   },
 
-  /**
-   * Insert a telemetry record (for AP3X driver app).
-   */
   async push(vehicleId, payload) {
-    const { data, error } = await supabase
-      .from('vehicle_telemetry')
-      .insert({ vehicle_id: vehicleId, ...payload })
-      .select().single()
-    if (error) throw error
-    return data
-  }
+    const rows = lsRead()
+    const row  = { ...payload, vehicle_id: vehicleId, id: uid(), created_at: new Date().toISOString() }
+    // Keep last 500 records per vehicle
+    const filtered = rows.filter(t => t.vehicle_id === vehicleId).slice(-499)
+    const others   = rows.filter(t => t.vehicle_id !== vehicleId)
+    lsWrite([...others, ...filtered, row])
+    // Broadcast to fleet HQ tab
+    try { new BroadcastChannel(BC_NAME).postMessage({ ...row }) } catch {}
+    useFleetStore.getState().updateTelemetry?.(vehicleId, row)
+    return row
+  },
 }
 
 export default telemetryService

@@ -1,47 +1,43 @@
 /**
- * APEX AI — System Status Hook (Run 16)
- * Monitors Supabase connectivity and updates the global app store.
+ * ============================================================
+ * APEX AI — System Status Hook (Local Mode)
+ * Monitors localStorage availability + navigator.onLine.
+ * Sets systemStatus to 'online' | 'degraded' | 'offline'.
+ * ============================================================
  */
 
 import { useEffect, useRef } from 'react'
-import { supabase }    from '@services/supabase/supabaseClient'
 import { useAppStore } from '@core/storage'
 
 export function useSystemStatus() {
   const setSystemStatus = useAppStore(s => s.setSystemStatus)
   const intervalRef     = useRef(null)
-  const channelRef      = useRef(null)
 
   useEffect(() => {
-    // Realtime heartbeat via presence
-    const channel = supabase.channel('system:heartbeat', {
-      config: { presence: { key: 'apex-os' } }
-    })
-
-    channel
-      .on('presence', { event: 'sync' }, () => {
-        setSystemStatus('online')
-      })
-      .subscribe(status => {
-        if (status === 'SUBSCRIBED') setSystemStatus('online')
-        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') setSystemStatus('degraded')
-        if (status === 'CLOSED') setSystemStatus('offline')
-      })
-
-    channelRef.current = channel
-
-    // Fallback — poll connectivity every 30s
-    intervalRef.current = setInterval(async () => {
+    const check = () => {
       try {
-        const { error } = await supabase.from('vehicles').select('id').limit(1)
-        setSystemStatus(error ? 'degraded' : 'online')
+        // Verify localStorage is writable
+        localStorage.setItem('apex:ping', '1')
+        localStorage.removeItem('apex:ping')
+        setSystemStatus(navigator.onLine ? 'online' : 'degraded')
       } catch {
         setSystemStatus('offline')
       }
-    }, 30000)
+    }
+
+    check()
+
+    const onOnline  = () => setSystemStatus('online')
+    const onOffline = () => setSystemStatus('degraded')
+
+    window.addEventListener('online',  onOnline)
+    window.addEventListener('offline', onOffline)
+
+    intervalRef.current = setInterval(check, 30000)
 
     return () => {
-      if (channelRef.current)  channelRef.current.unsubscribe()
+      window.removeEventListener('online',  onOnline)
+      window.removeEventListener('offline', onOffline)
       if (intervalRef.current) clearInterval(intervalRef.current)
     }
   }, [setSystemStatus])

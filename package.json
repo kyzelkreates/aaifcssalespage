@@ -10,7 +10,6 @@
     "lint": "eslint src --ext js,jsx"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.39.0",
     "clsx": "^2.1.0",
     "leaflet": "^1.9.4",
     "lucide-react": "^0.344.0",

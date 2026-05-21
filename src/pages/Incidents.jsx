@@ -9,7 +9,7 @@ import { useState, useEffect, useCallback } from 'react'
 import Icon from '@components/ui/Icon'
 import Badge from '@components/ui/Badge'
 import StatusDot from '@components/ui/StatusDot'
-import { supabase } from '@services/supabase/supabaseClient'
+
 import { formatDateTime } from '@utils/format'
 
 // ─── Enums ────────────────────────────────────────────────────
@@ -45,26 +45,31 @@ const DEMO = [
 ]
 
 // ─── DB helpers ───────────────────────────────────────────────
+const INC_KEY = 'apex:db:incidents'
+const lsRead = () => { try { return JSON.parse(localStorage.getItem(INC_KEY) || '[]') } catch { return [] } }
+const lsWrite = (v) => localStorage.setItem(INC_KEY, JSON.stringify(v))
+const lsUid = () => `inc_${Date.now()}_${Math.random().toString(36).slice(2,7)}`
+
 async function fetchIncidents(filters = {}) {
   try {
-    let q = supabase.from('incidents').select('*').order('created_at', { ascending: false }).limit(200)
-    if (filters.status)   q = q.eq('status',   filters.status)
-    if (filters.severity) q = q.eq('severity', filters.severity)
-    const { data, error } = await q
-    if (error || !data?.length) return DEMO
-    return data
+    let rows = lsRead().sort((a, b) => b.created_at?.localeCompare(a.created_at)).slice(0, 200)
+    if (filters.status)   rows = rows.filter(r => r.status === filters.status)
+    if (filters.severity) rows = rows.filter(r => r.severity === filters.severity)
+    return rows.length ? rows : DEMO
   } catch { return DEMO }
 }
 
 async function upsertIncident(payload, id) {
+  const rows = lsRead()
   if (id) {
-    const { data, error } = await supabase.from('incidents').update(payload).eq('id', id).select().single()
-    if (error) throw error
-    return data
+    const update = { ...payload, updated_at: new Date().toISOString() }
+    const idx = rows.findIndex(r => r.id === id)
+    if (idx > -1) { rows[idx] = { ...rows[idx], ...update }; lsWrite(rows) }
+    return rows[idx] || null
   }
-  const { data, error } = await supabase.from('incidents').insert(payload).select().single()
-  if (error) throw error
-  return data
+  const row = { ...payload, id: lsUid(), created_at: new Date().toISOString() }
+  lsWrite([row, ...rows])
+  return row
 }
 
 // ─── Incident Form Modal ──────────────────────────────────────

@@ -1,10 +1,18 @@
 /**
- * APEX AI — Dispatch Service
+ * ============================================================
+ * APEX AI — Dispatch Service (Local Mode)
+ * Full CRUD via localStorage. BroadcastChannel for live updates.
+ * ============================================================
  */
 
-import { supabase } from '@services/supabase/supabaseClient'
+const JOBS_KEY = 'apex:db:jobs'
+const BC_NAME  = 'apex:dispatch'
 
-export const JOB_STATUS = { PENDING: 'pending', ASSIGNED: 'assigned', IN_PROGRESS: 'in_progress', COMPLETED: 'completed', CANCELLED: 'cancelled' }
+const lsRead  = () => { try { return JSON.parse(localStorage.getItem(JOBS_KEY) || '[]') } catch { return [] } }
+const lsWrite = (v) => localStorage.setItem(JOBS_KEY, JSON.stringify(v))
+const uid     = () => `job_${Date.now()}_${Math.random().toString(36).slice(2,7)}`
+
+export const JOB_STATUS   = { PENDING: 'pending', ASSIGNED: 'assigned', IN_PROGRESS: 'in_progress', COMPLETED: 'completed', CANCELLED: 'cancelled' }
 export const JOB_PRIORITY = { LOW: 'low', NORMAL: 'normal', HIGH: 'high', URGENT: 'urgent' }
 
 export const STATUS_COLORS = {
@@ -12,45 +20,58 @@ export const STATUS_COLORS = {
   assigned:    'cyan',
   in_progress: 'amber',
   completed:   'cyan',
-  cancelled:   'red'
+  cancelled:   'red',
 }
 
 export const dispatchService = {
   async fetchJobs(filters = {}) {
-    let q = supabase.from('dispatch_jobs').select('*').order('created_at', { ascending: false })
-    if (filters.status)    q = q.eq('status', filters.status)
-    if (filters.driver_id) q = q.eq('driver_id', filters.driver_id)
-    if (filters.priority)  q = q.eq('priority', filters.priority)
-    const { data, error } = await q
-    if (error) throw error
-    return data || []
+    let rows = lsRead().sort((a, b) => b.created_at?.localeCompare(a.created_at))
+    if (filters.status)    rows = rows.filter(j => j.status === filters.status)
+    if (filters.driver_id) rows = rows.filter(j => j.driver_id === filters.driver_id)
+    if (filters.priority)  rows = rows.filter(j => j.priority === filters.priority)
+    return rows
   },
 
   async createJob(payload) {
-    const { data, error } = await supabase.from('dispatch_jobs').insert({ ...payload, status: JOB_STATUS.PENDING }).select().single()
-    if (error) throw error
-    return data
+    const rows = lsRead()
+    const row  = { ...payload, status: JOB_STATUS.PENDING, id: uid(), created_at: new Date().toISOString() }
+    lsWrite([row, ...rows])
+    try { new BroadcastChannel(BC_NAME).postMessage({ event: 'create', data: row }) } catch {}
+    return row
   },
 
   async updateJob(id, payload) {
-    const { data, error } = await supabase.from('dispatch_jobs').update(payload).eq('id', id).select().single()
-    if (error) throw error
-    return data
+    const rows   = lsRead()
+    const update = { ...payload, updated_at: new Date().toISOString() }
+    const idx    = rows.findIndex(j => j.id === id)
+    if (idx > -1) { rows[idx] = { ...rows[idx], ...update }; lsWrite(rows) }
+    try { new BroadcastChannel(BC_NAME).postMessage({ event: 'update', data: rows[idx] }) } catch {}
+    return rows[idx] || null
   },
 
   async assignJob(jobId, driverId, vehicleId) {
-    return this.updateJob(jobId, { driver_id: driverId, vehicle_id: vehicleId, status: JOB_STATUS.ASSIGNED, assigned_at: new Date().toISOString() })
+    return this.updateJob(jobId, {
+      driver_id: driverId, vehicle_id: vehicleId,
+      status: JOB_STATUS.ASSIGNED, assigned_at: new Date().toISOString(),
+    })
   },
 
   async cancelJob(id, reason) {
-    return this.updateJob(id, { status: JOB_STATUS.CANCELLED, cancel_reason: reason, cancelled_at: new Date().toISOString() })
+    return this.updateJob(id, {
+      status: JOB_STATUS.CANCELLED, cancel_reason: reason,
+      cancelled_at: new Date().toISOString(),
+    })
   },
 
   subscribeToJobs(callback) {
-    return supabase.channel('dispatch_live')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'dispatch_jobs' }, p => callback(p))
-      .subscribe()
-  }
+    try {
+      const bc = new BroadcastChannel(BC_NAME)
+      bc.onmessage = (e) => callback(e.data)
+      return bc
+    } catch {
+      return { close: () => {} }
+    }
+  },
 }
 
 export default dispatchService
